@@ -110,7 +110,9 @@ type Progress struct {
 type Raft struct {
 	id uint64
 
+	//任期号
 	Term uint64
+	//投票给哪个节点ID
 	Vote uint64
 
 	// the log
@@ -123,6 +125,7 @@ type Raft struct {
 	State StateType
 
 	// votes records
+	//哪些节点投票给了本节点
 	votes map[uint64]bool
 
 	// msgs need to send
@@ -160,24 +163,102 @@ type Raft struct {
 }
 
 // newRaft return a raft peer with the given config
+// 初始化新节点或从先前状态恢复
 func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	hs, _, err := c.Storage.InitialState()
+	if err != nil {
+		panic(err)
+	}
+
+	raft := Raft{
+		id:               c.ID,
+		Term:             hs.Term,
+		Vote:             hs.Vote,
+		RaftLog:          newLog(c.Storage),
+		Prs:              make(map[uint64]*Progress),
+		State:            StateFollower,
+		votes:            make(map[uint64]bool),
+		msgs:             []pb.Message{},
+		Lead:             None,
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout:  c.ElectionTick,
+	}
+
+	peers := c.peers
+	lastIndex := raft.RaftLog.LastIndex()
+	//为什么从cs获取peers peers包含自身
+	for _, p := range peers {
+		raft.Prs[p] = &Progress{Match: 0, Next: lastIndex + 1}
+	}
+	raft.Prs[raft.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
+	// 如果不是第一次启动而是从之前的数据进行恢复
+	/* if !isHardStateEqual(hs, emptyState) {
+		r.loadState(hs)
+	}
+	if c.Applied > 0 {
+		raftlog.appliedTo(c.Applied)
+	} */
+	return &raft
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
+// 对于leader
+// 目的
+// 1. 日志复制：leader发送新日志信息  Entries: pEntries,
+// 2. 一致性检查：找最后达成一致的索引  LogTerm: 	prevLogTerm, Index: 		prevLogIndex,
+// 3. 日志提交：通知follower当前leader提交进度，此索引前均可提交  Commit:  	r.RaftLog.committed,
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	prevLogIndex := r.Prs[to].Next - 1
+	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
+	if err != nil {
+		//TODO 不知道错误原因，如何处理
+		return false
+	}
+	entries := r.RaftLog.EntriesFromIndex(r.Prs[to].Next)
+	pEntries := make([]*pb.Entry, 0)
+	for _, p := range entries {
+		pEntries = append(pEntries, &p)
+	}
+	//entries := r.RaftLog.Entries(r.Prs[to].Next,r.RaftLog.LastIndex()+1)
+	m := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: prevLogTerm,
+		Index:   prevLogIndex,
+		Entries: pEntries,
+		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, m)
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
+// 目的：
+// 1. 让跟随者知道领导者仍然活跃。
+// 2. 更新跟随者的 commit 索引，使得跟随者可以应用已提交的日志条目。
+// 步骤：
+// 1. 构建心跳消息。
+// 2. 将心跳消息添加到待发送的消息列表中。
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	//TODO
+	//commit := min(r.prs[to].Match, r.raftLog.committed)
+	m := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, m)
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -185,14 +266,65 @@ func (r *Raft) tick() {
 	// Your Code Here (2A).
 }
 
-// becomeFollower transform this peer's state to Follower
-func (r *Raft) becomeFollower(term uint64, lead uint64) {
-	// Your Code Here (2A).
+/* func (r *Raft) resetTimeout() {
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
+	//增加随机选举时间
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+} */
+
+// 重置raft的一些状态
+func (r *raft) reset(term uint64) {
+	if r.Term != term {
+		// 如果是新的任期，那么保存任期号，同时将投票节点置空
+		r.Term = term
+		r.Vote = None
+	}
+	r.lead = None
+
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
+	// 重置选举超时
+	r.resetRandomizedElectionTimeout()
+
+	r.abortLeaderTransfer()
+
+	r.votes = make(map[uint64]bool)
+	// 似乎对于非leader节点来说，重置progress数组状态没有太多的意义？
+	for id := range r.prs {
+		r.prs[id] = &Progress{Next: r.raftLog.lastIndex() + 1, ins: newInflights(r.maxInflight)}
+		if id == r.id {
+			r.prs[id].Match = r.raftLog.lastIndex()
+		}
+	}
+	r.pendingConf = false
+	r.readOnly = newReadOnly(r.readOnly.option)
 }
 
+// becomeFollower transform this peer's state to Follower
+//1.状态更新为Follower
+//2.设置任期和领导者
+/* func (r *Raft) becomeFollower(term uint64, lead uint64) {
+	// Your Code Here (2A).
+	r.resetTimeout()
+	r.State = StateFollower
+
+	if term > r.Term {
+		r.Term = term
+	}
+	r.Lead = lead
+} */
+
 // becomeCandidate transform this peer's state to candidate
+// 投票请求 给自己投票 新任期 超时统计票数
+// TODO send投票请求  handle
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate
+	r.Term++
+	r.votes = make(map[uint64]bool, 0)
+	r.Vote = r.id
+	r.votes[r.id] = true
 }
 
 // becomeLeader transform this peer's state to leader
