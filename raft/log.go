@@ -146,6 +146,15 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 		return l.entries[l.applied-firstIndex+1 : min(l.committed-firstIndex+1, uint64(len(l.entries)))]
 	}
 	return []pb.Entry{}
+	/* firstIndex := l.FirstIndex()
+	appliedIndex := l.applied
+	commitedIndex := l.committed
+	if len(l.entries) > 0 {
+		if appliedIndex >= firstIndex-1 && commitedIndex >= firstIndex-1 && appliedIndex < commitedIndex && commitedIndex <= l.LastIndex() {
+			return l.entries[appliedIndex-firstIndex+1 : commitedIndex-firstIndex+1]
+		}
+	}
+	return make([]pb.Entry, 0) */
 }
 
 // add
@@ -193,7 +202,7 @@ func (l *RaftLog) FirstIndex() uint64 {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	if len(l.entries) == 0 {
+	/* if len(l.entries) == 0 {
 		lastIndex, err := l.storage.LastIndex()
 		if err != nil {
 			panic(err)
@@ -201,7 +210,28 @@ func (l *RaftLog) LastIndex() uint64 {
 		return lastIndex
 	} else {
 		return l.entries[len(l.entries)-1].Index
+	}*/
+
+	var snapLast uint64
+	if !IsEmptySnap(l.pendingSnapshot) {
+		snapLast = l.pendingSnapshot.Metadata.Index
 	}
+	if len(l.entries) > 0 {
+		return max(l.entries[len(l.entries)-1].Index, snapLast)
+	}
+	index, _ := l.storage.FirstIndex()
+	return max(index-1, snapLast)
+
+	/* var snapLast uint64
+	if !IsEmptySnap(l.pendingSnapshot) {
+		snapLast = l.pendingSnapshot.Metadata.Index
+	}
+	if len(l.entries) > 0 {
+		return max(l.entries[len(l.entries)-1].Index, snapLast)
+	}
+	lastIndex, _ := l.storage.LastIndex()
+	return max(lastIndex, snapLast) */
+
 }
 
 // Term return the term of the entry in the given index
@@ -221,4 +251,34 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	} else {
 		return 0, fmt.Errorf("requested entry at index %d is unavailable", i)
 	}
+}
+
+// RemoveEntriesAfter remove entries from index lo to the last
+func (l *RaftLog) RemoveEntriesAfter(lo uint64) {
+	firstIndex := l.FirstIndex()
+	l.stabled = min(l.stabled, lo-1)
+	if lo-firstIndex >= uint64(len(l.entries)) {
+		return
+	}
+	l.entries = l.entries[:lo-firstIndex]
+}
+
+func (l *RaftLog) commitTo(toCommit uint64) {
+	// never decrease commit
+	if l.committed < toCommit {
+		//if l.LastIndex() < toCommit {
+		//	log.Panicf("tocommit(%d) is out of range [lastIndex(%d)]. Was the raft log corrupted, truncated, or lost?", toCommit, l.LastIndex())
+		//}
+		l.committed = toCommit
+	}
+}
+
+func (r *RaftLog) deleteEntriesAfter(index uint64) {
+	if index < r.LastIndex() {
+		r.entries = r.entries[:index+1]
+	}
+}
+
+func (r *RaftLog) appendEntries(entries ...pb.Entry) {
+	r.entries = append(r.entries, entries...)
 }

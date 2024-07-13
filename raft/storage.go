@@ -62,6 +62,8 @@ type Storage interface {
 	// possibly available via Entries (older entries have been incorporated
 	// into the latest Snapshot; if storage only contains the dummy entry the
 	// first log entry is not available).
+	//FirstIndex 返回可能通过条目获取的第一个日志条目的索引
+	//（较早的条目已并入最新快照；如果存储中只包含虚拟条目，则第一个日志条目不可用）。
 	FirstIndex() (uint64, error)
 	// Snapshot returns the most recent snapshot.
 	// If snapshot is temporarily unavailable, it should return ErrSnapshotTemporarilyUnavailable,
