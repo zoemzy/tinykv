@@ -185,16 +185,16 @@ func newRaft(c *Config) *Raft {
 	}
 
 	raft := Raft{
-		id:               c.ID,
-		Term:             hs.Term,
-		Vote:             hs.Vote,
-		RaftLog:          raftLog,
-		Prs:              make(map[uint64]*Progress),
-		State:            StateFollower,
-		votes:            make(map[uint64]bool),
-		voteCount:        0,
-		rejectCount:      0,
-		msgs:             []pb.Message{},
+		id:          c.ID,
+		Term:        hs.Term,
+		Vote:        hs.Vote,
+		RaftLog:     raftLog,
+		Prs:         make(map[uint64]*Progress),
+		State:       StateFollower,
+		votes:       make(map[uint64]bool),
+		voteCount:   0,
+		rejectCount: 0,
+		//msgs:             []pb.Message{},
 		Lead:             None,
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
@@ -416,7 +416,6 @@ func (r *Raft) appendEntry(es []*pb.Entry) {
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
-	return
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
@@ -852,4 +851,19 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+func (raft *Raft) getSoftState() *SoftState {
+	return &SoftState{
+		Lead:      raft.Lead,
+		RaftState: raft.State,
+	}
+}
+
+func (raft *Raft) getHardState() pb.HardState {
+	return pb.HardState{
+		Term:   raft.Term,
+		Vote:   raft.Vote,
+		Commit: raft.RaftLog.committed,
+	}
 }
